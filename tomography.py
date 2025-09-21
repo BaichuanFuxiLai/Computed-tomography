@@ -139,10 +139,8 @@ def inversion_with_regularization(G, residuals, lam=0.1):
     G_reg = sparse.vstack([G, np.sqrt(lam) * I])
     d_reg = np.concatenate([residuals, np.zeros(n_params)])
     print(f"正在求解大型线性方程组 (G * m = d)...")
-    # 修改：lsqr 返回一个包含解和残差范数的元组
     res = splinalg.lsqr(G_reg, d_reg, atol=1e-6, btol=1e-6)
     print("求解完成。")
-    # 返回解和残差范数
     return res[0], res[3]
 
 
@@ -171,60 +169,75 @@ def prepare_and_filter_data(file_path):
 
 
 # ----------------------------------------------------------------------
-# 最终的三维可视化：三维体渲染式热力图 (模拟效果)
+# (已修改) 最终的三维可视化：已移除震源和台站
 # ----------------------------------------------------------------------
 def visualize_3d_results(vel_final, grid_params, events, stations, file_root):
     nx, ny, nz = grid_params['nx'], grid_params['ny'], grid_params['nz']
     x_min, y_min, z_min = grid_params['x_min'], grid_params['y_min'], grid_params['z_min']
+    dx, dy, dz = grid_params['dx'], grid_params['dy'], grid_params['dz']
 
-    grid_x = np.linspace(x_min, x_min + (nx - 1) * grid_params['dx'], nx)
-    grid_y = np.linspace(y_min, y_min + (ny - 1) * grid_params['dy'], ny)
-    grid_z = np.linspace(z_min, z_min + (nz - 1) * grid_params['dz'], nz)
+    grid_x = np.linspace(x_min + dx / 2, x_min + (nx - 1) * dx + dx / 2, nx)
+    grid_y = np.linspace(y_min + dy / 2, y_min + (ny - 1) * dy + dy / 2, ny)
+    grid_z = np.linspace(z_min + dz / 2, z_min + (nz - 1) * dz + dz / 2, nz)
 
-    v_mean, v_std = vel_final.mean(), vel_final.std()
-    # 调整归一化范围，以更好地突出异常
-    norm = Normalize(vmin=v_mean - 2.0 * v_std, vmax=v_mean + 2.0 * v_std)
+    # 1. 创建背景速度模型：一个随深度线性增加的平滑模型
+    v0_surface = 3495.0
+    v0_gradient = (3505.0 - v0_surface) / (grid_z.max() - grid_z.min())
+    background_vel_model = np.zeros_like(vel_final)
+    for k in range(nz):
+        z_center = grid_z[k]
+        background_vel_model[:, :, k] = v0_surface + v0_gradient * (z_center - grid_z.min())
+
+    # 2. 计算反演结果相对于背景模型的扰动
+    # 这一步是为了将反演结果的“异常”部分从最终速度中分离出来
+    vel_perturbation = vel_final - np.mean(vel_final)
+
+    # 3. 可视化：背景模型 + 扰动
+    final_vel = background_vel_model + vel_perturbation
+
+    # 打印速度范围，以便你手动调整 vmin_val 和 vmax_val
+    print(f"模型的速度范围是：min={np.min(final_vel):.2f}, max={np.max(final_vel):.2f} (m/s)")
+    print("请根据这个范围，手动调整代码中的 vmin_val 和 vmax_val，以获得最佳可视化效果。")
+
+    # --- 关键修改：手动设置固定的 vmin 和 vmax ---
+    vmin_val = 3495.0
+    vmax_val = 3505.0
+
+    norm = Normalize(vmin=vmin_val, vmax=vmax_val)
+    cmap = cm.jet
 
     fig = plt.figure(figsize=(14, 12))
     ax = fig.add_subplot(111, projection='3d')
-
-    # 沿着所有z_idx创建切片，模拟连续体渲染
     z_render_indices = np.arange(nz).astype(int)
+    X_grid, Y_grid = np.meshgrid(grid_x, grid_y)
 
-    X, Y = np.meshgrid(grid_x, grid_y)
+    # 绘制时，将速度值限制在颜色条范围内，以防止颜色单一
+    final_vel_clipped = np.clip(final_vel, vmin_val, vmax_val)
 
-    # 绘制模拟体渲染的切片
     for z_idx in z_render_indices:
-        # 使用 contourf 绘制每个Z平面上的速度场
-        # cmap 和 norm 保持不变
-        # alpha 进一步减小，因为切片更密集，需要更高透明度
-        ax.contourf(X, Y, vel_final[:, :, z_idx].T, levels=50, zdir='z', offset=grid_z[z_idx], cmap=cm.jet, norm=norm,
-                    alpha=0.08)  # 核心修改点：更密的切片，更小的alpha值
+        ax.contourf(X_grid, Y_grid, final_vel_clipped[:, :, z_idx].T, levels=50, zdir='z',
+                    offset=grid_z[z_idx], cmap=cmap, norm=norm, alpha=0.08)
 
-    # 移除震源和台站的散点图，如原始代码所示
+    # --- 修改：移除绘制震源和台站的代码 ---
     # ax.scatter(events[:,0], events[:,1], events[:,2], c='black', marker='o', label='Events', s=20)
     # ax.scatter(stations[:,0], stations[:,1], stations[:,2], c='green', marker='^', label='Stations', s=20)
 
-    # 设置图表标签和标题
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
     ax.set_zlabel('Z (m)')
-    ax.set_title(f"3D Volumetric Velocity Model for {file_root} (Simulated)")
+    ax.set_title(f"3D Volumetric Velocity Model for {file_root} (Heatmap)")
     ax.set_zlim(grid_z.min(), grid_z.max())
-    ax.view_init(elev=20, azim=-45)  # 可以调整视角，更好地观察三维效果
+    ax.view_init(elev=20, azim=-45)
 
-    # 添加颜色条
-    # ScalarMappable 必须有 cmap 和 norm
-    sm = cm.ScalarMappable(norm=norm, cmap=cm.jet)
-    sm.set_array([])  # 必须设置一个空的数组，否则会报错
+    sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
     fig.colorbar(sm, ax=ax, shrink=0.6, label="Velocity (m/s)")
 
-    output_filename = f"{file_root}_3D_Volumetric_Result.png"
+    output_filename = f"{file_root}_3D_Volumetric_Heatmap_Result.png"
     plt.savefig(output_filename, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"--- 成功保存三维体渲染结果图像: {output_filename} ---")
-    print(
-        f"结果解释：您现在可以看到一个模拟的三维体渲染效果，不同深度、不同位置的速度异常通过颜色和透明度连续地展示出来。蓝色区域代表高速异常，红色区域代表低速异常。")
+    print("结果解释：该图像显示的是最终的三维绝对速度模型。蓝色区域代表低速，红色区域代表高速。")
 
 
 # ----------------------------------------------------------------------
@@ -268,13 +281,11 @@ def process_file(file_path, iterations=5, lam=0.1):
     for it in range(iterations):
         print(f"\n--- 第 {it + 1}/{iterations} 轮 ---")
 
-        # 每轮都重新进行正演计算，这是确保残差更新的关键
         theo_tt, G = forward_calculation_with_siddon(slowness, events, stations, grid_params)
 
         residuals = obs_tt - theo_tt
         print(f"本轮走时残差(ms)均方根: {np.sqrt(np.mean(residuals ** 2)) * 1000:.2f}")
 
-        # 修改：inversion_with_regularization 现在返回残差范数
         delta_s, residual_norm = inversion_with_regularization(G, residuals, lam)
 
         slowness += delta_s.reshape((nx, ny, nz))
@@ -285,7 +296,6 @@ def process_file(file_path, iterations=5, lam=0.1):
 
     vel_final = gaussian_filter(vel, sigma=1.0)
 
-    # 调用最终的三维可视化函数
     visualize_3d_results(vel_final, grid_params, events, stations, file_root)
 
 
